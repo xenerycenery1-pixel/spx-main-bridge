@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "BAUKO SPX BRIDGE",
+  "version": "2.1.2",
+  "description": "BAUKO SPX Bridge for Bauko Hub (station 3634): pulls Inventory, Delivering and OnHold exports from SPX into the BAUKO Dispatch Checker and Rider OnHold Checker.",
+  "host_permissions": [
+    "https://spx.shopee.ph/*",
+    "https://*.susercontent.com/*",
+    "https://*.file.susercontent.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://xenerycenery1-pixel.github.io/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*",
+        "file:///*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
