@@ -1,5 +1,5 @@
 // ============================================================
-// BAUKO SPX BRIDGE v2.2.1 - service worker (Dispatch Checker + Rider OnHold Checker)
+// BAUKO SPX BRIDGE v2.4.0 - service worker (Dispatch Checker + Rider OnHold Checker)
 // Same pipeline SPX's own Export button uses (and the BADOC bridge copies):
 //   1) POST export request  -> task_id
 //   2) poll list_for_portal -> export_status 2 (done)
@@ -10,8 +10,9 @@
 // ============================================================
 
 const SPX_ORIGIN = "https://spx.shopee.ph";
-const STATION_ID = 3634;                 // Bauko Hub (fixed)
-const VERSION = "2.2.1";
+// No fixed station: SPX scopes every export to the station of the logged-in SPX account.
+// The station is read from the finished export task and reported to the page (stationId).
+const VERSION = "2.4.0";
 
 const EXPORT_PATH = "/api/admin/tracking/am_hub/forward/export";
 const TASK_LIST_PATH = "/spxdata/api/export_platform/export_task/list_for_portal";
@@ -125,7 +126,7 @@ function shiftDate(date, days) {
 }
 
 // ---------- export request bodies ----------
-function buildBody(kind, date) {
+function buildBody(kind, date, stationId) {
   const job = JOBS[kind];
   const start = dayStartSec(date);
   const endSec = start + 86400 - 1;                     // 23:59:59 of the dispatch date
@@ -137,6 +138,7 @@ function buildBody(kind, date) {
     bulky_type: "1,0,2",
     ctime: fromSec + "," + endSec
   };
+  if (stationId) body.current_station_ids = [stationId];   // blank = SPX uses the logged-in account's own station
   let assigned = "";
   if (kind === "delivering") {
     body.pick_up_time = start + "," + endSec;           // Assigned Time = dispatch date
@@ -197,7 +199,7 @@ function parseJson(label, response) {
 
 async function submitExport(kind, date, run) {
   const job = JOBS[kind];
-  const body = buildBody(kind, date);
+  const body = buildBody(kind, date, run.stationId);
   progress(job.label + ": submitting SPX export for " + date + "...", run);
   const res = await spxFetch(SPX_ORIGIN + EXPORT_PATH, {
     method: "POST",
@@ -294,13 +296,17 @@ function parseCondition(task) {
   try { return JSON.parse(String(raw)); } catch (_) { return {}; }
 }
 // returns "" when OK, otherwise a human-readable reason
-function checkTask(task, kind) {
+function checkTask(task, kind, expectedStation) {
   if (String(task.export_name || "") !== EXPORT_NAME || String(task.biz_name || "") !== BIZ_NAME) {
     return "export type is " + (task.export_name || "?") + "/" + (task.biz_name || "?");
   }
-  const st = Number(task.station_id || 0);
-  if (st && st !== STATION_ID) {
-    return "export belongs to station " + st + ", not Bauko Hub (" + STATION_ID + "). Use the Bauko Hub SPX account.";
+  // The export was requested for one station. If SPX echoes the station filter back, it must match.
+  if (expectedStation) {
+    const cond = parseCondition(task);
+    const echoed = Array.isArray(cond.current_station_ids) ? cond.current_station_ids.map(Number) : null;
+    if (echoed && echoed.length && !echoed.includes(expectedStation)) {
+      return "export is for station " + echoed.join(",") + ", not the requested station " + expectedStation + ".";
+    }
   }
   const ts = String(parseCondition(task).tracking_status || "");
   if (!ts || !setsEqual(ts.split(",").map((s) => s.trim()).filter(Boolean), JOBS[kind].ids)) {
@@ -315,15 +321,16 @@ async function runPipeline(kind, date, riderId, run) {
   const taskId = await submitExport(kind, date, run);
   const waitStartSec = Math.max(0, Math.floor((run.startedAt - 10 * 60 * 1000) / 1000));
   const task = await waitForCompletion(taskId, waitStartSec, run, job.label);
-  const why = checkTask(task, kind);
+  const why = checkTask(task, kind, run.expectedStation);
   if (why) throw new Error(job.label + ": the finished SPX task is not the expected export - " + why);
 
-  progress(job.label + ": export ready, downloading CSV...", run);
+  const stationId = run.stationId || null;
+  progress(job.label + ": export ready" + (stationId ? " (station " + stationId + ")" : " (account default station)") + ", downloading CSV...", run);
   const signed = await getSignedDownloadUrl(taskId);
   const csv = await downloadCsv(signed, "bauko_" + kind + ".csv");
   const rowCount = Math.max(0, csv.text.split(/\r?\n/).filter(Boolean).length - 1);
   progress(job.label + ": downloaded " + rowCount.toLocaleString() + " rows. Sending to BAUKO...", run);
-  sendToPage(job.outType, { date, riderId: riderId || null, taskId, fileName: csv.fileName, rowCount, csvText: csv.text }, run);
+  sendToPage(job.outType, { date, riderId: riderId || null, stationId, taskId, fileName: csv.fileName, rowCount, csvText: csv.text }, run);
 }
 
 async function runSync(run, kinds, date, riderId) {
@@ -390,9 +397,17 @@ chrome.runtime.onConnect.addListener((port) => {
       return;
     }
     const date = ISO.test(msg.date || "") ? msg.date : todayManila();
-    const run = { startedAt: 0, cancelled: false, tabKey };
+    let stationId = null;
+    if (msg.stationId !== null && msg.stationId !== undefined && String(msg.stationId).trim() !== "") {
+      stationId = Number(msg.stationId);
+      if (!Number.isInteger(stationId) || stationId <= 0) {
+        sendToPage("BAUKO_BRIDGE_ERROR", { message: "Invalid Station ID: " + msg.stationId }, { tabKey });
+        return;
+      }
+    }
+    const run = { startedAt: 0, cancelled: false, tabKey, stationId, expectedStation: stationId };
     jobs.set(tabKey, run);
-    progress("Starting " + kinds.join(" + ") + " sync for " + date + " (Bauko Hub " + STATION_ID + ")...", run);
+    progress("Starting " + kinds.join(" + ") + " sync for " + date + (stationId ? " (station " + stationId + ")" : "") + "...", run);
     void runSync(run, kinds, date, msg.riderId || null);
   });
 
