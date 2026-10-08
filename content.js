@@ -1,5 +1,5 @@
 // ============================================================
-// BAUKO SPX BRIDGE v2.1.2 - page side (BAUKO Dispatch Checker + Rider OnHold Checker <-> service worker)
+// BAUKO SPX BRIDGE v2.2.1 - page side (BAUKO Dispatch Checker + Rider OnHold Checker <-> service worker)
 // Runs ONLY on the BAUKO page (see manifest "matches"), never on SPX.
 // ============================================================
 (() => {
@@ -8,8 +8,8 @@
 
   const PAGE_SOURCE = "BAUKO_SPX_BRIDGE";   // extension -> page
   const CHECKER_SOURCE = "BAUKO_CHECKER";    // page -> extension
-  const VERSION = "2.1.2";
-  const START = ["BAUKO_START_INVENTORY_SYNC", "BAUKO_START_DELIVERING_SYNC", "BAUKO_START_FULL_SYNC", "BAUKO_START_ONHOLD_SYNC"];
+  const VERSION = "2.2.1";
+  const START = ["BAUKO_START_INVENTORY_SYNC", "BAUKO_START_DELIVERING_SYNC", "BAUKO_START_FULL_SYNC", "BAUKO_START_ONHOLD_SYNC", "BAUKO_OPEN_ORDER"];
 
   let port = null;
   let reconnectTimer = null;
@@ -78,7 +78,7 @@
         return;
       }
       try {
-        port.postMessage({ type: m.type, date: m.date || null, riderId: m.riderId || null });
+        port.postMessage({ type: m.type, date: m.date || null, riderId: m.riderId || null, orderId: m.orderId || null });
       } catch (error) {
         emit("BAUKO_BRIDGE_ERROR", { message: (error && error.message) || String(error) });
       }

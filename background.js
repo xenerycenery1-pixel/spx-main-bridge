@@ -1,5 +1,5 @@
 // ============================================================
-// BAUKO SPX BRIDGE v2.1.2 - service worker (Dispatch Checker + Rider OnHold Checker)
+// BAUKO SPX BRIDGE v2.2.1 - service worker (Dispatch Checker + Rider OnHold Checker)
 // Same pipeline SPX's own Export button uses (and the BADOC bridge copies):
 //   1) POST export request  -> task_id
 //   2) poll list_for_portal -> export_status 2 (done)
@@ -11,7 +11,7 @@
 
 const SPX_ORIGIN = "https://spx.shopee.ph";
 const STATION_ID = 3634;                 // Bauko Hub (fixed)
-const VERSION = "2.1.2";
+const VERSION = "2.2.1";
 
 const EXPORT_PATH = "/api/admin/tracking/am_hub/forward/export";
 const TASK_LIST_PATH = "/spxdata/api/export_platform/export_task/list_for_portal";
@@ -49,16 +49,43 @@ const JOBS = {
 };
 
 // One entry per connected BAUKO page (Dispatch Checker, OnHold Checker, ...).
-// v2.1.1 kept a SINGLE port and disconnected the old one whenever a new page connected,
-// so two open pages kicked each other out forever ("Bridge connection closed" / "Reconnecting...").
+// Older versions kept a SINGLE port and disconnected the previous one whenever a new page
+// connected, so two open pages kicked each other out forever ("Bridge connection closed" / "Reconnecting...").
 const ports = new Set();         // every live page port
 const jobs = new Map();          // tabKey -> running sync { startedAt, cancelled, tabKey }
-let keepAliveTimer = null;
 let portSeq = 0;
+
+// ---------- reuse one SPX order tab ----------
+// Clicking an Order ID in the checker sends it here. If an SPX order-detail tab is already
+// open we point it at the new order and focus it; otherwise we open one (later clicks reuse it).
+const ORDER_RE = /^[A-Za-z0-9_-]{4,64}$/;
+const RELOAD_ON_SWITCH = true;   // force a fresh load when only the #/orderDetail/<id> part changes
+async function openOrder(orderId, run) {
+  if (!ORDER_RE.test(orderId)) { sendToPage("BAUKO_BRIDGE_ERROR", { message: "Invalid Order ID: " + orderId }, run); return; }
+  const url = SPX_ORIGIN + "/#/orderDetail/" + encodeURIComponent(orderId) + "/proof_of_onhold";
+  try {
+    const tabs = await chrome.tabs.query({ url: SPX_ORIGIN + "/*" });
+    const viewers = tabs.filter((t) => /#\/orderDetail\//.test(t.url || ""));
+    viewers.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0));
+    const tab = viewers[0];
+    if (tab) {
+      const same = (tab.url || "") === url;
+      await chrome.tabs.update(tab.id, { url, active: true });
+      try { await chrome.windows.update(tab.windowId, { focused: true }); } catch (_) {}
+      if (RELOAD_ON_SWITCH || same) { await sleep(150); try { await chrome.tabs.reload(tab.id); } catch (_) {} }
+    } else {
+      await chrome.tabs.create({ url, active: true });
+    }
+    sendToPage("BAUKO_ORDER_OPENED", { orderId }, run);
+  } catch (e) {
+    sendToPage("BAUKO_BRIDGE_ERROR", { message: "Could not open the SPX tab: " + ((e && e.message) || e) }, run);
+  }
+}
+let keepAliveTimer = null;
 
 // MV3 service workers are stopped by Chrome after ~30s without extension activity,
 // and fetch()/setTimeout waits do not count. While a sync runs, ping an extension API
-// and push a message down the ports every 20s so the worker (and the ports) stay alive.
+// and push a message down the port every 20s so the worker (and the port) stay alive.
 function startKeepAlive() {
   if (keepAliveTimer) return;
   keepAliveTimer = setInterval(() => {
@@ -73,7 +100,7 @@ function stopKeepAlive() {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 
-// run given -> only the page (tab) that started that sync; no run -> every connected page.
+// run given -> only the page (tab) that started it; no run -> every connected page.
 function sendToPage(type, data = {}, run = null) {
   let sent = false;
   for (const p of Array.from(ports)) {
@@ -333,8 +360,7 @@ chrome.runtime.onConnect.addListener((port) => {
     return;
   }
 
-  // Identify the page: one key per browser tab (reconnects of the same tab keep the same key,
-  // so a running sync keeps reporting to it).
+  // One key per browser tab; reconnects of the same tab keep the key, so a running sync keeps reporting to it.
   const tab = port.sender && port.sender.tab;
   const tabKey = tab && tab.id != null ? "tab" + tab.id : "p" + (++portSeq);
   port.__tabKey = tabKey;
@@ -349,6 +375,7 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onMessage.addListener((msg) => {
     if (!msg || !msg.type) return;
     if (msg.type === "BAUKO_PING") return;
+    if (msg.type === "BAUKO_OPEN_ORDER") { void openOrder(String(msg.orderId || ""), { tabKey }); return; }
     if (msg.type === "BAUKO_ABORT_SYNC") { const j = jobs.get(tabKey); if (j) j.cancelled = true; return; }
 
     const kinds =
